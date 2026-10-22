@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "view-simulate"
+version = "0.1.0"
+description = "Visualize robot camera and lidar fields of view, including occlusion."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "trimesh>=4.0",
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+    "qtpy>=2.4",
+    "PySide6>=6.6",
+]
+
+[project.scripts]
+view-simulate = "view_simulate.app:main"
+
+[tool.setuptools.packages.find]
+include = ["view_simulate*"]
+
+[tool.setuptools.package-data]
+view_simulate = ["data/*.urdf"]

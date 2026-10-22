@@ -1,0 +1,15 @@
+.deps/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+artifacts/
+view_simulate/_raymesh.so
+view_simulate/_raymesh.dll
+
+view_simulate/data/
+
+view_simulate/data/
