@@ -56,16 +56,20 @@ def render_frame(plotter, frame: Frame) -> None:
             smooth_shading=False,
             name="dyn_robot",
         )
-    for index, (mesh, color, opacity, edges) in enumerate(frame.frustums):
+    for index, (mesh, color, opacity, lit) in enumerate(frame.frustums):
         poly = trimesh_to_polydata(mesh, use_face_color=False)
         plotter.add_mesh(
             poly,
             color=color,
             opacity=float(opacity),
-            lighting=False,
-            show_edges=bool(edges),
-            edge_color=color,
-            line_width=2,
+            smooth_shading=bool(lit) and len(mesh.faces) > 24,
+            lighting=bool(lit),
+            ambient=0.65,
+            diffuse=0.55,
+            specular=0.3,
+            specular_power=20,
+            backface_culling=False,
+            show_edges=False,
             name=f"dyn_frustum_{index}",
         )
     for index, (pose, length) in enumerate(frame.axes):

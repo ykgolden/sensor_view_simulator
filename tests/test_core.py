@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import time
 import unittest
@@ -25,6 +26,19 @@ def _box_at(center, size):
     mesh = trimesh.creation.box(extents=size)
     mesh.apply_translation(center)
     return mesh
+
+
+def _forward_normal_z(vertices, faces):
+    """Z component of the unit normal on the cap face closest to the forward axis."""
+    verts = vertices[faces]
+    normals = np.cross(verts[:, 1] - verts[:, 0], verts[:, 2] - verts[:, 0])
+    length = np.linalg.norm(normals, axis=1)
+    usable = length > 1e-8
+    centers = verts.mean(axis=1)
+    forward = centers[:, 0]
+    forward = np.where(usable, forward, -np.inf)
+    chosen = int(np.argmax(forward))
+    return float(normals[chosen, 2] / length[chosen])
 
 
 class MathTests(unittest.TestCase):
@@ -123,9 +137,39 @@ class SensorTests(unittest.TestCase):
         camera = Sensor("c", "camera", "base", [0, 0, 0], [0, 0, 0], hfov_deg=60, vfov_deg=40, max_range=2.5)
         mesh = frustum_mesh(camera)
         self.assertTrue(np.isclose(np.max(mesh.vertices[:, 0]), 2.5))
+        far = np.all(mesh.faces != 0, axis=1)
+        verts = mesh.vertices
+        faces = mesh.faces[far]
+        normals = np.cross(verts[faces[:, 1]] - verts[faces[:, 0]], verts[faces[:, 2]] - verts[faces[:, 0]])
+        centers = verts[faces].mean(axis=1)
+        self.assertTrue(np.all(np.einsum("ij,ij->i", normals, centers) > 0))
         lidar = Sensor("l", "lidar", "base", [0, 0, 0], [0, 0, 0], hfov_deg=120, vfov_deg=30, max_range=4)
         shell = frustum_mesh(lidar)
         self.assertTrue(np.isclose(np.max(np.linalg.norm(shell.vertices, axis=1)), 4.0, atol=1e-6))
+        band = Sensor(
+            "band",
+            "lidar",
+            "base",
+            [0, 0, 0],
+            [0, 0, 0],
+            hfov_min_deg=-180,
+            hfov_max_deg=180,
+            vfov_min_deg=-45,
+            vfov_max_deg=45,
+            max_range=10,
+        )
+        closed = frustum_mesh(band)
+        origin = int(np.argmin(np.linalg.norm(closed.vertices, axis=1)))
+        self.assertLess(np.linalg.norm(closed.vertices[origin]), 1e-8)
+        caps = closed.faces[np.any(closed.faces == origin, axis=1)]
+        rim = np.where(caps == origin, 0, 1)
+        rim_z = np.sum(closed.vertices[caps][:, :, 2] * rim, axis=1) / np.maximum(rim.sum(axis=1), 1)
+        self.assertTrue(np.any(rim_z > 1.0))
+        self.assertTrue(np.any(rim_z < -1.0))
+        above = caps[rim_z > 1.0]
+        below = caps[rim_z < -1.0]
+        self.assertGreater(_forward_normal_z(closed.vertices, above), 0.0)
+        self.assertLess(_forward_normal_z(closed.vertices, below), 0.0)
         body = lidar_body_mesh()
         self.assertLess(np.max(np.linalg.norm(body.vertices, axis=1)), 0.1)
         self.assertGreater(len(body.faces), 0)
@@ -353,6 +397,25 @@ class RobotTests(unittest.TestCase):
         )
         self.assertEqual(len(results), 2)
         self.assertTrue(all(len(item.coverage_labels) > 0 for item in results))
+
+
+class MetalShaderTests(unittest.TestCase):
+    def test_shader_ships_with_the_package(self):
+        import view_simulate.metal_rays as metal_rays
+
+        source = Path(metal_rays.__file__).with_name("ray_mesh.metal")
+        text = source.read_text(encoding="utf-8")
+        self.assertIn("kernel void ray_kernel", text)
+        self.assertIn("clearance", text)
+
+    def test_metal_is_skipped_off_mac(self):
+        if sys.platform == "darwin":
+            return
+        from view_simulate.metal_rays import compute
+
+        ray = np.zeros((1, 3), dtype=np.float32)
+        faces = np.zeros((1, 3), dtype=np.float32)
+        self.assertIsNone(compute(ray, ray, faces, faces, faces, 0.01))
 
 
 if __name__ == "__main__":

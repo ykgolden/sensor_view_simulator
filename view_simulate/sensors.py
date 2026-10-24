@@ -230,14 +230,15 @@ def _camera_frustum(h0: float, h1: float, v0: float, v1: float, distance: float)
         ],
         dtype=float,
     )
+    # Winding points outward so the lit side is the outside of the volume.
     faces = np.array(
         [
-            [0, 1, 2],
-            [0, 2, 3],
-            [0, 3, 4],
-            [0, 4, 1],
-            [1, 4, 3],
-            [1, 3, 2],
+            [0, 2, 1],
+            [0, 3, 2],
+            [0, 4, 3],
+            [0, 1, 4],
+            [1, 3, 4],
+            [1, 2, 3],
         ],
         dtype=np.int64,
     )
@@ -245,24 +246,9 @@ def _camera_frustum(h0: float, h1: float, v0: float, v1: float, distance: float)
 
 
 def _lidar_shell(h0: float, h1: float, v0: float, v1: float, distance: float) -> trimesh.Trimesh:
-    full = _full_circle(h0, h1)
-    n_h = 48 if full else 36
-    n_v = 10
-    if full:
-        yaws = np.linspace(-np.pi, np.pi, n_h, endpoint=False)
-    else:
-        yaws = np.linspace(h0, h1, n_h)
-    pitches = np.linspace(v0, v1, n_v)
-    yaw, pitch = np.meshgrid(yaws, pitches)
-    cosine = np.cos(pitch)
-    vertices = np.stack(
-        [
-            distance * cosine * np.cos(yaw),
-            distance * cosine * np.sin(yaw),
-            distance * np.sin(pitch),
-        ],
-        axis=-1,
-    ).reshape(-1, 3)
+    grid, full = _lidar_grid(h0, h1, v0, v1, distance)
+    n_v, n_h, _ = grid.shape
+    vertices = grid.reshape(-1, 3)
     faces = []
     column_count = n_h if full else n_h - 1
     for row in range(n_v - 1):
@@ -274,20 +260,69 @@ def _lidar_shell(h0: float, h1: float, v0: float, v1: float, distance: float) ->
             d = (row + 1) * n_h + col
             faces.append((a, b, c))
             faces.append((a, c, d))
-    if not full:
+    # Close the volume on the elevation limits. Each limit, swept in azimuth,
+    # is a cone from the sensor out to that ring: the two equal sides of the
+    # vertical cross-section. A full turn has no azimuth side walls.
+    lower = _ring_has_radius(grid[0])
+    upper = _ring_has_radius(grid[-1])
+    if not full or lower or upper:
         origin = len(vertices)
         vertices = np.vstack([vertices, np.zeros((1, 3))])
-        for row in range(n_v - 1):
-            a = row * n_h
-            d = (row + 1) * n_h
-            b = row * n_h + (n_h - 1)
-            c = (row + 1) * n_h + (n_h - 1)
-            faces.append((origin, d, a))
-            faces.append((origin, b, c))
+        if not full:
+            for row in range(n_v - 1):
+                a = row * n_h
+                d = (row + 1) * n_h
+                b = row * n_h + (n_h - 1)
+                c = (row + 1) * n_h + (n_h - 1)
+                faces.append((origin, d, a))
+                faces.append((origin, b, c))
+        if lower:
+            _append_elevation_cap(faces, origin, 0, n_h, full, upward=False)
+        if upper:
+            _append_elevation_cap(faces, origin, (n_v - 1) * n_h, n_h, full, upward=True)
     if not faces:
         vertices = np.array([[0.0, 0.0, 0.0], [distance, 0.0, 0.0], [distance, 0.01, 0.0]])
         faces = [(0, 1, 2)]
     return trimesh.Trimesh(vertices, np.array(faces, dtype=np.int64), process=False)
+
+
+def _lidar_grid(h0: float, h1: float, v0: float, v1: float, distance: float):
+    full = _full_circle(h0, h1)
+    n_h = 48 if full else 36
+    n_v = 10
+    if full:
+        yaws = np.linspace(-np.pi, np.pi, n_h, endpoint=False)
+    else:
+        yaws = np.linspace(h0, h1, n_h)
+    pitches = np.linspace(v0, v1, n_v)
+    yaw, pitch = np.meshgrid(yaws, pitches)
+    cosine = np.cos(pitch)
+    grid = np.stack(
+        [
+            distance * cosine * np.cos(yaw),
+            distance * cosine * np.sin(yaw),
+            distance * np.sin(pitch),
+        ],
+        axis=-1,
+    )
+    return grid, full
+
+
+def _ring_has_radius(ring: np.ndarray) -> bool:
+    """False when the elevation limit sits on the vertical axis and the cone vanishes."""
+    return float(np.max(np.hypot(ring[:, 0], ring[:, 1]))) > 1e-4
+
+
+def _append_elevation_cap(faces, origin: int, row_start: int, n_h: int, closed: bool, upward: bool) -> None:
+    count = n_h if closed else n_h - 1
+    for col in range(count):
+        nxt = (col + 1) % n_h if closed else col + 1
+        inner = row_start + col
+        outer = row_start + nxt
+        if upward:
+            faces.append((origin, inner, outer))
+        else:
+            faces.append((origin, outer, inner))
 
 
 def _limits_from_span(span: float, low, high) -> tuple[float, float]:

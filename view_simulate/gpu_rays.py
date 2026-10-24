@@ -1,4 +1,7 @@
-"""CUDA ray-mesh distances. Falls back to None when the GPU cannot be used."""
+"""GPU ray-mesh distances. macOS uses Metal; Windows and Linux use CUDA.
+
+Returns None when the GPU cannot be used so the caller can stay on the CPU path.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import ctypes
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +26,17 @@ def device_label() -> str:
 def mesh_distances(origins, directions, v0, e1, e2, clearance: float):
     """Closest hit distance per ray. None means the caller should use the CPU path."""
     global _device
+    if sys.platform == "darwin":
+        from view_simulate.metal_rays import compute, device_name
+
+        out = compute(origins, directions, v0, e1, e2, clearance)
+        if out is None:
+            _device = "CPU"
+            return None
+        _device = device_name()
+        distances = np.asarray(out, dtype=np.float64)
+        distances[~np.isfinite(distances)] = np.inf
+        return distances
     lib = _library()
     if lib is None:
         return None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import traceback
 import warnings
 from pathlib import Path
@@ -32,7 +33,7 @@ def _select_qt_binding() -> None:
 _select_qt_binding()
 
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
 from qtpy.QtGui import QColor, QFont
 from qtpy.QtWidgets import (
     QApplication,
@@ -62,15 +63,53 @@ from qtpy.QtWidgets import (
 from pyvistaqt import QtInteractor
 
 from view_simulate.draw import Frame, coverage_colors, prepare_plotter, render_frame
+from view_simulate.live import (
+    DEFAULT_CELL_LIMIT,
+    LiveServer,
+    occlusion_summary,
+    select_cells,
+)
 from view_simulate.robot import (
     bundled_urdf,
     load_urdf,
     manual_base,
     next_link_color,
 )
-from view_simulate.sensors import PALETTE, Sensor, demo_sensors, frustum_mesh, lidar_body_mesh, sensor_pose
+from view_simulate.sensors import (
+    PALETTE,
+    Sensor,
+    demo_sensors,
+    frustum_mesh,
+    lidar_body_mesh,
+    sensor_pose,
+)
 from view_simulate.gpu_rays import device_label
 from view_simulate.visibility import evaluate_sensors, surrounding_half
+
+
+class _LiveBridge(QObject):
+    """Run a live-port request on the window thread and wait for its reply."""
+
+    requested = Signal(object)
+
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self._window = window
+        self.requested.connect(self._run, Qt.QueuedConnection)
+
+    def ask(self, request: dict) -> dict:
+        holder = {"request": request, "event": threading.Event()}
+        self.requested.emit(holder)
+        if not holder["event"].wait(120):
+            return {"ok": False, "error": "界面正忙，120 秒内没有返回"}
+        return holder.get("response") or {"ok": False, "error": "界面没有返回结果"}
+
+    def _run(self, holder: dict) -> None:
+        try:
+            holder["response"] = self._window.handle_live(holder["request"])
+        except Exception as exc:
+            holder["response"] = {"ok": False, "error": str(exc)}
+        holder["event"].set()
 
 
 class MainWindow(QMainWindow):
@@ -87,9 +126,13 @@ class MainWindow(QMainWindow):
         self._occlusion = {}
         self._occlusion_cache_key = None
         self._last_dir = str(Path.home())
+        self._status_message = "左键旋转，中键平移，滚轮缩放"
+        self._live_bridge = None
+        self._live = None
         self._build_ui()
         prepare_plotter(self.plotter)
         self._set_robot(self.robot)
+        self._start_live()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -332,10 +375,12 @@ class MainWindow(QMainWindow):
             render_frame(self.plotter, frame)
             if frame.reset_camera:
                 self._frame = False
+            self._status_message = message
             self.statusBar().showMessage(message)
         except Exception as exc:
             traceback.print_exc()
-            self.statusBar().showMessage(f"计算失败：{exc}")
+            self._status_message = f"计算失败：{exc}"
+            self.statusBar().showMessage(self._status_message)
         finally:
             self._busy = False
             if self._dirty:
@@ -354,7 +399,7 @@ class MainWindow(QMainWindow):
         frustums = []
         axes = []
         only_current = self.chk_only.isChecked()
-        targets = []
+        targets = self._occlusion_targets()
         for index, sensor in enumerate(self.sensors):
             try:
                 pose = sensor_pose(self.robot, sensor)
@@ -370,12 +415,9 @@ class MainWindow(QMainWindow):
                 mesh = frustum_mesh(sensor)
                 mesh.apply_transform(pose)
                 if sensor.kind == "camera":
-                    frustums.append((mesh, sensor.color, 0.18 if chosen else 0.06, True))
+                    frustums.append((mesh, sensor.color, 0.45 if chosen else 0.26, True))
                 else:
-                    # Fill stays faint so a full shell does not hide the robot. Edges carry the color.
-                    frustums.append((mesh, sensor.color, 0.10 if chosen else 0.05, True))
-            if (show_coverage or show_hits) and (chosen or not only_current):
-                targets.append(sensor)
+                    frustums.append((mesh, sensor.color, 0.38 if chosen else 0.20, True))
         robot_mesh = self.robot.world_mesh()
         walls = self._wall_spec(robot_mesh)
         key = self._occlusion_key(targets)
@@ -514,14 +556,163 @@ class MainWindow(QMainWindow):
             rays = sum(item.n_rays for item in results)
             parts.append(f"回波 {echoes}/{rays}")
         if show_coverage:
-            label_chunks = [item.coverage_labels for item in results if len(item.coverage_labels)]
-            labels = np.concatenate(label_chunks) if label_chunks else np.zeros(0, dtype=np.int8)
-            parts.append(f"可见 {int(np.sum(labels == 2))}")
-            parts.append(f"被挡 {int(np.sum(labels == 1))}")
-            parts.append(f"视场外 {int(np.sum(labels == 0))}")
+            voxels = np.zeros(0, dtype=np.int8)
+            if results and results[0].voxel_labels is not None:
+                voxels = np.asarray(results[0].voxel_labels)
+            parts.append(f"绿色占用 {int(np.sum(voxels == 2))}")
+            parts.append(f"红色占用 {int(np.sum(voxels == 1))}")
         parts.append(device_label())
         parts.append(f"{elapsed:.0f} ms")
         return "  |  ".join(parts)
+
+    def _occlusion_targets(self):
+        show = self.chk_coverage.isChecked() or self.chk_hits.isChecked()
+        only_current = self.chk_only.isChecked()
+        selected = self.sensor_list.currentRow()
+        targets = []
+        for index, sensor in enumerate(self.sensors):
+            try:
+                sensor_pose(self.robot, sensor)
+            except KeyError:
+                continue
+            if show and (index == selected or not only_current):
+                targets.append(sensor)
+        return targets
+
+    def _displayed_occlusion(self):
+        targets = self._occlusion_targets()
+        key = self._occlusion_key(targets)
+        stale = bool(targets) and key != self._occlusion_cache_key
+        results = []
+        if targets and not stale:
+            try:
+                results = [self._occlusion[id(sensor)] for sensor in targets]
+            except KeyError:
+                stale = True
+        return targets, results, stale
+
+    def handle_live(self, request: dict) -> dict:
+        method = request.get("method")
+        if method == "get_live_state":
+            return {"ok": True, "result": self._live_state()}
+        if method == "get_occlusion_cells":
+            return {"ok": True, "result": self._live_cells(request)}
+        return {"ok": False, "error": f"未知方法 {method}"}
+
+    def _live_state(self) -> dict:
+        targets, results, stale = self._displayed_occlusion()
+        selected = self._current()
+        return {
+            "robot": {
+                "name": self.robot.name,
+                "source": getattr(self.robot, "source", ""),
+                "links": len(self.robot.links),
+                "movable_joints": len(self.robot.movable_joints()),
+                "joints": self._joint_rows(),
+            },
+            "sensors": [sensor.to_dict() for sensor in self.sensors],
+            "selected_sensor": None if selected is None else selected.name,
+            "display": self._display_options(),
+            "occlusion": self._occlusion_payload(targets, results, stale),
+        }
+
+    def _live_cells(self, request: dict) -> dict:
+        targets, results, stale = self._displayed_occlusion()
+        payload = self._occlusion_payload(targets, results, stale)
+        if stale or not results or not self.chk_coverage.isChecked():
+            payload.update({"total": 0, "truncated": False, "limit": DEFAULT_CELL_LIMIT, "cells": []})
+            return payload
+        centers = results[0].voxel_centers
+        labels = results[0].voxel_labels
+        if centers is None or labels is None:
+            centers = np.zeros((0, 3))
+            labels = np.zeros(0, dtype=np.int8)
+        selected = select_cells(
+            centers,
+            labels,
+            request.get("min"),
+            request.get("max"),
+            int(request.get("limit") or DEFAULT_CELL_LIMIT),
+        )
+        payload.update(selected)
+        return payload
+
+    def _occlusion_payload(self, targets, results, stale: bool) -> dict:
+        return occlusion_summary(
+            results,
+            stale=stale,
+            status=self._status_message,
+            sensor_names=[sensor.name for sensor in targets],
+            requested_cell_size=float(self.cell_size.value()),
+            slice_height=float(self.slice_height.value()),
+            show_coverage=self.chk_coverage.isChecked(),
+            show_hits=self.chk_hits.isChecked(),
+            only_current=self.chk_only.isChecked(),
+        )
+
+    def _display_options(self) -> dict:
+        return {
+            "frustum": self.chk_frustum.isChecked(),
+            "coverage": self.chk_coverage.isChecked(),
+            "hits": self.chk_hits.isChecked(),
+            "ground": self.chk_ground.isChecked(),
+            "walls": self.chk_walls.isChecked(),
+            "only_current": self.chk_only.isChecked(),
+            "clearance_m": float(self.clearance.value()),
+            "surface_spacing_m": float(self.surface_spacing.value()),
+            "ground_z_m": float(self.ground_z.value()),
+            "ground_spacing_m": float(self.ground_spacing.value()),
+            "cell_size_m": float(self.cell_size.value()),
+            "voxel_opacity": float(self.voxel_opacity.value()),
+            "slice_height_m": float(self.slice_height.value()),
+            "wall_distance_m": float(self.wall_distance.value()),
+            "wall_height_m": float(self.wall_height.value()),
+            "grid_extent_m": float(self.grid_extent.value()),
+        }
+
+    def _joint_rows(self) -> list[dict]:
+        rows = []
+        for joint in self.robot.movable_joints():
+            lower = float(min(joint.lower, joint.upper))
+            upper = float(max(joint.lower, joint.upper))
+            if joint.type == "prismatic":
+                rows.append(
+                    {
+                        "name": joint.name,
+                        "type": joint.type,
+                        "value_m": float(joint.value),
+                        "lower_m": lower,
+                        "upper_m": upper,
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "name": joint.name,
+                        "type": joint.type,
+                        "value_deg": float(np.rad2deg(joint.value)),
+                        "lower_deg": float(np.rad2deg(lower)),
+                        "upper_deg": float(np.rad2deg(upper)),
+                    }
+                )
+        return rows
+
+    def _start_live(self) -> None:
+        self._live_bridge = _LiveBridge(self)
+        self._live = LiveServer(self._live_bridge.ask)
+        try:
+            self._live.start()
+            self._live.write_endpoint()
+        except OSError as exc:
+            self._status_message = f"实时端口没有打开：{exc}"
+            self.statusBar().showMessage(self._status_message)
+            return
+        self.setWindowTitle(f"传感器视野仿真  ·  {self._live.host}:{self._live.port}")
+
+    def closeEvent(self, event) -> None:
+        if self._live is not None:
+            self._live.stop()
+        super().closeEvent(event)
 
     def _set_robot(self, robot, frame: bool = True) -> None:
         self.robot = robot

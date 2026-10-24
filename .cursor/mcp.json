@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "view-simulate": {
+      "command": "python3",
+      "args": ["-m", "view_simulate.mcp_server"]
+    }
+  }
+}
