@@ -118,6 +118,7 @@ def _add_occupancy(plotter, centers, labels, size: float, opacity: float) -> Non
     for name, label, color in (
         ("dyn_voxel_visible", 2, "#2ecc71"),
         ("dyn_voxel_blocked", 1, "#e64646"),
+        ("dyn_voxel_outside", 0, "#a8aeb8"),
     ):
         chosen = centers[labels == label]
         if len(chosen) == 0:

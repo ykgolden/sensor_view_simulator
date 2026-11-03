@@ -38,6 +38,7 @@ class SummaryTests(unittest.TestCase):
         self.assertTrue(summary["stale"])
         self.assertEqual(summary["green"], 0)
         self.assertEqual(summary["red"], 0)
+        self.assertEqual(summary["gray"], 0)
         self.assertEqual(summary["per_sensor"], [])
         self.assertIn("重新点", summary["notes"][0])
 
@@ -55,6 +56,7 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(summary["green"], 1)
         self.assertEqual(summary["red"], 2)
+        self.assertEqual(summary["gray"], 0)
         self.assertEqual(summary["drawn"], 3)
         self.assertEqual(summary["used_cell_size_m"], 0.75)
         self.assertEqual(summary["per_sensor"][0]["surface_visible"], 1)

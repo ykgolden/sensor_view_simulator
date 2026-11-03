@@ -67,6 +67,7 @@ def occlusion_summary(
         "slice_height_m": slice_height,
         "green": 0,
         "red": 0,
+        "gray": 0,
         "drawn": 0,
         "echo_hits": 0,
         "echo_rays": 0,
@@ -75,7 +76,7 @@ def occlusion_summary(
     }
     if stale:
         summary["notes"].append(
-            "参数已经变化，画面上的遮挡着色和占用网格已清掉。绿格和红格按当前画面计为 0，不是上一次的结果。需要在程序里重新点「计算遮挡」。"
+            "参数已经变化，画面上的遮挡着色和占用网格已清掉。绿格、红格和灰格按当前画面计为 0，不是上一次的结果。需要在程序里重新点「计算遮挡」。"
         )
         return summary
     if not results:
@@ -112,19 +113,23 @@ def occlusion_summary(
         used = float(results[0].voxel_size or 0.0)
     green = int(np.sum(voxels == 2))
     red = int(np.sum(voxels == 1))
+    gray = int(np.sum(voxels == 0))
     summary["green"] = green
     summary["red"] = red
-    summary["drawn"] = green + red
+    summary["gray"] = gray
+    summary["drawn"] = green + red + gray
     summary["used_cell_size_m"] = used
 
     if show_coverage and slice_height <= 1e-6:
-        summary["notes"].append("最高高度为 0，没有占用网格，绿格和红格都是 0。")
+        summary["notes"].append("最高高度为 0，没有占用网格，绿格、红格和灰格都是 0。")
     elif show_coverage and used > requested_cell_size + 1e-6:
         summary["notes"].append(
             f"格子数量超过上限，实际边长从 {requested_cell_size:g} m 加大到 {used:g} m。画面上的立方体用的是加大后的边长。"
         )
     if show_coverage and len(sensor_names) > 1:
-        summary["notes"].append("多只传感器合并计数：任一传感器能看见的格子算绿色，只有全部被挡住才算红色。")
+        summary["notes"].append(
+            "多只传感器合并计数：任一传感器能看见的格子算绿色，在视场内但都被挡住的算红色，不在任何视场里的算灰色。"
+        )
     if show_coverage and summary["drawn"]:
         summary["notes"].append(
             "绿色格子是视场里没有被挡住的位置，包含空气，不只是打到表面上的点。"
@@ -160,7 +165,7 @@ def select_cells(centers, labels, minimum, maximum, limit: int) -> dict:
             {
                 "xyz": [float(value) for value in centers[item]],
                 "label": label,
-                "color": "green" if label == 2 else "red" if label == 1 else "other",
+                "color": "green" if label == 2 else "red" if label == 1 else "gray" if label == 0 else "other",
             }
         )
     return {

@@ -242,6 +242,43 @@ class OcclusionTests(unittest.TestCase):
         self.assertEqual(tuple(colors[1]), (230, 70, 70))
         self.assertEqual(tuple(colors[2]), (46, 204, 122))
 
+    def test_unseen_cells_fill_the_extent_and_height_box(self):
+        robot = RobotModel("empty")
+        robot.add_root(Link("base"))
+        sensor = Sensor(
+            "cam",
+            "camera",
+            "base",
+            [0, 0, 0.5],
+            [0, 0, 0],
+            hfov_deg=50,
+            vfov_deg=50,
+            max_range=3,
+        )
+        result = evaluate_sensor(
+            robot,
+            sensor,
+            ground=False,
+            walls=(8.0, 0.0, 2.0),
+            slice_height=1.0,
+            cell_size=1.0,
+            volume_half=2.0,
+            want_hits=False,
+            want_coverage=True,
+        )
+        centers = np.asarray(result.voxel_centers)
+        labels = np.asarray(result.voxel_labels)
+        self.assertEqual(len(centers), len(labels))
+        self.assertEqual(len(centers), 16)
+        self.assertTrue(np.isclose(result.voxel_size, 1.0))
+        self.assertTrue(np.all(np.abs(centers[:, 0]) <= 2.0))
+        self.assertTrue(np.all(np.abs(centers[:, 1]) <= 2.0))
+        self.assertTrue(np.all(np.isclose(centers[:, 2], 0.5)))
+        seen = np.isclose(centers[:, 0], 1.5) & np.isclose(np.abs(centers[:, 1]), 0.5)
+        self.assertEqual(int(np.sum(seen)), 2)
+        self.assertTrue(np.all(labels[seen] == 2))
+        self.assertTrue(np.all(labels[~seen] == 0))
+
     def test_occupancy_grid_fills_the_column_above_the_ground(self):
         centers, size = occupancy_centers(1.0, -1.0, 1.0, 0.5)
         self.assertTrue(np.isclose(size, 0.5))

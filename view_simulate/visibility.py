@@ -1,4 +1,4 @@
-"""Ray-cast visibility. Green is seen, red is inside the field of view but blocked."""
+"""Ray-cast visibility. Green is seen, red is inside the field of view but blocked, gray is outside every field of view."""
 
 from __future__ import annotations
 
@@ -248,7 +248,8 @@ def evaluate_sensors(
     )
     sampled = _sample_robot(robot, surface_spacing, cap=10000) if want_coverage and sensors else None
     occupancy = float(slice_height) > 1e-6 and float(cell_size) > 1e-6
-    half = float(walls[0]) if walls is not None else volume_half
+    # The occupancy box is ±volume_half in X and Y, from the ground up to slice_height.
+    half = None if volume_half is None else float(volume_half)
     results = [
         _evaluate_one(
             robot,
@@ -272,9 +273,6 @@ def evaluate_sensors(
             pose = sensor_pose(robot, sensor)
             labels = query.label_points(centers, pose, sensor)
             merged = np.maximum(merged, labels)
-        keep = merged > 0
-        centers = centers[keep]
-        merged = merged[keep]
     else:
         centers = np.zeros((0, 3))
         merged = np.zeros(0, dtype=np.int8)

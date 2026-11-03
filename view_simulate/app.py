@@ -310,11 +310,13 @@ class MainWindow(QMainWindow):
         self.wall_height = _double(0.5, 30, 0.1, 2, 3)
         self.grid_extent = _double(1, 200, 1, 1, 10)
         self.clearance.setToolTip("忽略传感器原点附近这么远的命中，避免装进壳体内部时全部被挡住")
-        self.grid_extent.setToolTip("X、Y 刻度从 -N 画到 N，单位米。机器人比这个范围大时会自动再扩大。")
+        self.grid_extent.setToolTip(
+            "X、Y 刻度从 -N 画到 N，单位米。占用网格的水平范围用这个值；机器人更大时，画面刻度会再扩大，格子不会。改完要重新计算遮挡"
+        )
         self.ground_z.setToolTip("遮挡用的水平面高度，相对机器人根连杆，单位米")
         self.cell_size.setToolTip("占用网格每个立方体的边长。格子太多时会自动加大")
         self.voxel_opacity.setToolTip("1 是不透明，数值越小格子越透。改这个不用重新计算")
-        self.slice_height.setToolTip("占用网格从地面向上铺到这个高度。0 表示不画占用网格")
+        self.slice_height.setToolTip("占用网格从地面向上铺到这个高度，水平范围是刻度范围。0 表示不画占用网格")
         self.wall_distance.setToolTip("四面墙到原点的水平距离。机器人比这个更大时，墙会自动退到机体外侧")
         self.wall_height.setToolTip("墙从地面向上的高度，用来看竖直方向的遮挡")
         form.addRow("近处忽略 m", self.clearance)
@@ -436,7 +438,7 @@ class MainWindow(QMainWindow):
                 walls=walls,
                 slice_height=float(self.slice_height.value()),
                 cell_size=float(self.cell_size.value()),
-                volume_half=surrounding_half(robot_mesh, float(self.wall_distance.value())),
+                volume_half=float(self.grid_extent.value()),
                 want_hits=show_hits,
                 want_coverage=show_coverage,
             )
@@ -523,6 +525,7 @@ class MainWindow(QMainWindow):
             round(float(self.ground_spacing.value()), 5),
             round(float(self.cell_size.value()), 3),
             round(float(self.slice_height.value()), 3),
+            round(float(self.grid_extent.value()), 3),
             bool(self.chk_walls.isChecked()),
             round(float(self.wall_distance.value()), 3),
             round(float(self.wall_height.value()), 3),
@@ -561,6 +564,7 @@ class MainWindow(QMainWindow):
                 voxels = np.asarray(results[0].voxel_labels)
             parts.append(f"绿色占用 {int(np.sum(voxels == 2))}")
             parts.append(f"红色占用 {int(np.sum(voxels == 1))}")
+            parts.append(f"灰色占用 {int(np.sum(voxels == 0))}")
         parts.append(device_label())
         parts.append(f"{elapsed:.0f} ms")
         return "  |  ".join(parts)
